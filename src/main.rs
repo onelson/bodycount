@@ -1,6 +1,6 @@
 use opencv::core::{no_array, Scalar};
 use opencv::features2d::DrawMatchesFlags;
-use opencv::imgcodecs::IMREAD_COLOR;
+use opencv::imgcodecs::{IMREAD_COLOR, IMREAD_GRAYSCALE};
 use opencv::types::{VectorOfDMatch, VectorOfi8};
 use opencv::{
     core, features2d, features2d::Feature2DTrait, highgui, imgcodecs, prelude::*, Result,
@@ -9,9 +9,11 @@ use opencv::{
 fn main() -> Result<()> {
     let mask = no_array()?;
 
-    let target = imgcodecs::imread("you-died.png", IMREAD_COLOR)?;
-    let full_frame =
-        imgcodecs::imread(&std::env::args().nth(1).expect("input image"), IMREAD_COLOR)?;
+    let target = imgcodecs::imread("you-died-bw.png", IMREAD_GRAYSCALE)?;
+    let full_frame = imgcodecs::imread(
+        &std::env::args().nth(1).expect("input image"),
+        IMREAD_GRAYSCALE,
+    )?;
 
     let height = 160;
     let width = 910;
