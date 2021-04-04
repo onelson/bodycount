@@ -10,7 +10,15 @@ fn main() -> Result<()> {
     let mask = no_array()?;
 
     let target = imgcodecs::imread("you-died.png", IMREAD_COLOR)?;
-    let frame = imgcodecs::imread(&std::env::args().nth(1).expect("input image"), IMREAD_COLOR)?;
+    let full_frame =
+        imgcodecs::imread(&std::env::args().nth(1).expect("input image"), IMREAD_COLOR)?;
+
+    let height = 160;
+    let width = 910;
+    let x = 490;
+    let y = 465;
+
+    let frame = Mat::roi(&full_frame, core::Rect::new(x, y, width, height))?;
 
     let mut orb = features2d::ORB::default()?;
 
