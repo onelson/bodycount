@@ -1,19 +1,14 @@
-use opencv::core::{no_array, Scalar};
-use opencv::features2d::DrawMatchesFlags;
-use opencv::imgcodecs::{IMREAD_COLOR, IMREAD_GRAYSCALE};
-use opencv::types::{VectorOfDMatch, VectorOfi8};
-use opencv::{
-    core, features2d, features2d::Feature2DTrait, highgui, imgcodecs, prelude::*, Result,
-};
+use opencv::core::no_array;
+use opencv::imgcodecs::IMREAD_COLOR;
+use opencv::{core, highgui, imgcodecs, imgproc, prelude::*, Result};
 
 fn main() -> Result<()> {
     let mask = no_array()?;
 
-    let target = imgcodecs::imread("you-died-bw.png", IMREAD_GRAYSCALE)?;
-    let full_frame = imgcodecs::imread(
-        &std::env::args().nth(1).expect("input image"),
-        IMREAD_GRAYSCALE,
-    )?;
+    let template = imgcodecs::imread("you-died-bw.png", IMREAD_COLOR)?;
+    let template_size = template.size()?;
+    let full_frame =
+        imgcodecs::imread(&std::env::args().nth(1).expect("input image"), IMREAD_COLOR)?;
 
     let height = 160;
     let width = 910;
@@ -22,62 +17,47 @@ fn main() -> Result<()> {
 
     let frame = Mat::roi(&full_frame, core::Rect::new(x, y, width, height))?;
 
-    let mut orb = features2d::ORB::default()?;
-
-    let (kp1, des1) = {
-        let mut kps = opencv::types::VectorOfKeyPoint::new();
-        let mut descriptors = Mat::default()?;
-        orb.detect_and_compute(&target, &mask, &mut kps, &mut descriptors, false)?;
-        (kps, descriptors)
-    };
-
-    let (kp2, des2) = {
-        let mut kps = opencv::types::VectorOfKeyPoint::new();
-        let mut descriptors = Mat::default()?;
-        orb.detect_and_compute(&frame, &mask, &mut kps, &mut descriptors, false)?;
-        (kps, descriptors)
-    };
-
-    let bf = features2d::BFMatcher::new(core::NORM_HAMMING, true)?;
-    let matches = {
-        let mut matches = VectorOfDMatch::default();
-        bf.train_match(&des1, &des2, &mut matches, &mask)?;
-        matches
-    };
-
-    println!("matches: {}", matches.len());
-
-    let mut matches = matches.to_vec();
-
-    matches.sort_by_key(|x| x.distance as i64);
-
-    for match_ in &matches {
-        println!(
-            "{:?}",
-            (
-                match_.query_idx,
-                match_.img_idx,
-                match_.train_idx,
-                match_.distance
-            )
-        );
-    }
-
     let mut out = Mat::default()?;
-    let matches_mask = VectorOfi8::default();
-    features2d::draw_matches(
-        &target,
-        &kp1,
-        &frame,
-        &kp2,
-        &VectorOfDMatch::from_iter(matches.into_iter().take(3)),
-        &mut out,
-        Scalar::new(0., 127., 0., 0.),
-        Scalar::new(0., 0., 127., 0.),
-        &matches_mask,
-        DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS,
-    )?;
-    highgui::imshow("hello opencv!", &out)?;
+
+    let meth = imgproc::TM_CCOEFF;
+
+    imgproc::match_template(&frame, &template, &mut out, meth, &mask)?;
+
+    let (_min_val, _max_val, min_loc, max_loc) = {
+        let mut min_val = 0.;
+        let mut max_val = 0.;
+        let mut min_loc = core::Point::default();
+        let mut max_loc = core::Point::default();
+        core::min_max_loc(
+            &out,
+            &mut min_val,
+            &mut max_val,
+            &mut min_loc,
+            &mut max_loc,
+            &mask,
+        )?;
+        (min_val, max_val, min_loc, max_loc)
+    };
+
+    let top_left = if [imgproc::TM_SQDIFF_NORMED, imgproc::TM_SQDIFF_NORMED].contains(&meth) {
+        min_loc
+    } else {
+        max_loc
+    };
+
+    println!("{:?} {}/{}", top_left, _min_val, _max_val);
+
+    let rect = core::Rect::new(
+        top_left.x,
+        top_left.y,
+        template_size.width,
+        template_size.height,
+    );
+
+    let mut out2 = frame.clone();
+    imgproc::rectangle(&mut out2, rect, core::Scalar_([0., 255., 0., 0.]), 4, 0, 0)?;
+
+    highgui::imshow("hello opencv!", &out2)?;
     highgui::wait_key(30000)?;
     Ok(())
 }
