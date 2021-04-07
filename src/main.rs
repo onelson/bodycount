@@ -7,60 +7,55 @@ fn main() -> Result<()> {
         imgcodecs::IMREAD_COLOR,
     )?;
 
-    println!(
-        "channels: {:?}",
-        (target.channels()?, full_frame.channels()?)
-    );
-
     let height = 160;
     let width = 910;
     let x = 490;
     let y = 465;
     let frame = Mat::roi(&full_frame, core::Rect::new(x, y, width, height))?;
 
-    let mut splits1 = opencv::types::VectorOfMat::new();
-    let mut splits2 = opencv::types::VectorOfMat::new();
-
-    core::split(&target, &mut splits1).expect("split 1");
-    core::split(&frame, &mut splits2).expect("split 2");
-
-    let red1 = &splits1.get(2)?;
-    let red2 = &splits2.get(2)?;
-
-    highgui::imshow("red1", red1)?;
-    highgui::imshow("red2", red2)?;
+    highgui::imshow("frame", &frame)?;
 
     let mask = core::no_array()?;
 
-    let mut h1 = Mat::default()?;
-    let mut h2 = Mat::default()?;
+    let mut hsv1 = Mat::default()?;
+    let mut hsv2 = Mat::default()?;
+
+    imgproc::cvt_color(&target, &mut hsv1, imgproc::COLOR_BGR2HSV, 0)?;
+    imgproc::cvt_color(&frame, &mut hsv2, imgproc::COLOR_BGR2HSV, 0)?;
+
+    let mut hist1 = Mat::default()?;
+    let mut hist2 = Mat::default()?;
+
+    debug_assert_eq!(hsv1.channels()?, 3);
+    debug_assert_ne!(hsv1.size()?.width, 0);
+    debug_assert_ne!(hsv1.size()?.height, 0);
 
     imgproc::calc_hist(
-        &splits1,
-        &core::Vector::from(vec![2]),
+        &hsv1,
+        &vec![0, 1].into(),
         &mask,
-        &mut h1,
-        &core::Vector::from(vec![256]),
-        &core::Vector::from(vec![0., 256.]),
+        &mut hist1,
+        &vec![50, 60].into(),
+        &vec![0., 180., 0., 256.].into(),
         false,
     )
     .expect("calc hist 1");
 
     imgproc::calc_hist(
-        &splits2,
-        &core::Vector::from(vec![2]),
+        &hsv2,
+        &vec![0, 1].into(),
         &mask,
-        &mut h2,
-        &core::Vector::from(vec![256]),
-        &core::Vector::from(vec![0., 256.]),
+        &mut hist2,
+        &vec![50, 60].into(),
+        &vec![0., 180., 0., 256.].into(),
         false,
     )
     .expect("calc hist 2");
 
     let mut norm1 = Mat::default()?;
     let mut norm2 = Mat::default()?;
-    core::normalize(&h1, &mut norm1, 0., 1., core::NORM_MINMAX, -1, &mask)?;
-    core::normalize(&h2, &mut norm2, 0., 1., core::NORM_MINMAX, -1, &mask)?;
+    core::normalize(&hist1, &mut norm1, 0., 1., core::NORM_MINMAX, -1, &mask)?;
+    core::normalize(&hist2, &mut norm2, 0., 1., core::NORM_MINMAX, -1, &mask)?;
 
     let distance = imgproc::compare_hist(&norm1, &norm2, imgproc::HISTCMP_INTERSECT)?;
 
