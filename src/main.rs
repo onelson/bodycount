@@ -1,40 +1,55 @@
 //! Port of https://github.com/opencv/opencv/blob/master/samples/dnn/text_detection.cpp
 //! Check the source cpp file for where to get the NN files.
 
+use levenshtein::levenshtein;
+use opencv::{
+    core::{self, Point2f, Scalar, Size},
+    dnn, highgui, imgproc,
+    prelude::*,
+    types::{VectorOfPoint2f, VectorOfString, VectorOfVectorOfPoint},
+    videoio,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 use std::{
     error::Error,
     fs::File,
     io::{BufRead, BufReader},
     path::PathBuf,
 };
-
-use opencv::{
-    core::{self, Point2f, Scalar, Size},
-    dnn, highgui, imgproc,
-    prelude::*,
-    types::{VectorOfPoint2f, VectorOfString, VectorOfVectorOfPoint},
-};
+use structopt::StructOpt;
 
 type Result<T, E = Box<dyn Error>> = std::result::Result<T, E>;
 
+#[derive(Debug, StructOpt)]
+struct Opt {
+    #[structopt(short, long, env)]
+    stream_url: String,
+    #[structopt(short, long, env, parse(from_os_str))]
+    data_file: PathBuf,
+    #[structopt(long, env, default_value = "0.0.0.0")]
+    http_host: String,
+    #[structopt(long, env, default_value = "7878")]
+    http_port: u16,
+}
+
+/// Find text in the frame.
 fn detect_text(
     frame: &Mat,
-    detector: &TextDetectionModel_EAST,
-    recognizer: &TextRecognitionModel,
-) -> Result<()> {
-    let imread_rgb = false;
-
+    detector: &dnn::TextDetectionModel_EAST,
+    recognizer: &dnn::TextRecognitionModel,
+) -> Result<Option<Vec<String>>> {
     let mut det_results = VectorOfVectorOfPoint::new();
     detector.detect(&frame, &mut det_results)?;
 
     if !det_results.is_empty() {
+        let mut matches = vec![];
         // Text Recognition
-        let rec_input = if !imread_rgb {
+        let rec_input = {
             let mut rec_input = Mat::default()?;
             imgproc::cvt_color(&frame, &mut rec_input, imgproc::COLOR_BGR2GRAY, 0)?;
-            Some(rec_input)
-        } else {
-            None
+            rec_input
         };
 
         for quadrangle in &det_results {
@@ -42,17 +57,15 @@ fn detect_text(
             for pt in &quadrangle {
                 quadrangle_2f.push(Point2f::new(pt.x as f32, pt.y as f32))
             }
-            let cropped = four_points_transform(
-                rec_input.as_ref().unwrap_or(&frame),
-                quadrangle_2f.as_slice(),
-            )?;
+            let cropped = four_points_transform(&rec_input, quadrangle_2f.as_slice())?;
 
             let recognition_result = recognizer.recognize(&cropped)?;
-            println!("Recognition result: {}", recognition_result);
+            matches.push(recognition_result);
         }
+        return Ok(Some(matches));
     }
 
-    Ok(())
+    Ok(None)
 }
 
 fn four_points_transform(frame: &Mat, vertices: &[Point2f]) -> Result<Mat> {
@@ -68,6 +81,8 @@ fn four_points_transform(frame: &Mat, vertices: &[Point2f]) -> Result<Mat> {
     ];
     let rotation_matrix =
         imgproc::get_perspective_transform_slice(&vertices, &target_vertices, core::DECOMP_LU)?;
+
+    // XXX: Seems like we could probably skip the warp since the text should always be level.
     let mut out = Mat::default()?;
     imgproc::warp_perspective(
         frame,
@@ -81,10 +96,7 @@ fn four_points_transform(frame: &Mat, vertices: &[Point2f]) -> Result<Mat> {
     Ok(out)
 }
 
-use opencv::dnn::{TextDetectionModel_EAST, TextRecognitionModel};
-use opencv::videoio;
-
-fn main() -> Result<()> {
+fn get_dnn() -> Result<(dnn::TextDetectionModel_EAST, dnn::TextRecognitionModel)> {
     let conf_threshold = 0.5;
     let nms_threshold = 0.4;
 
@@ -130,36 +142,142 @@ fn main() -> Result<()> {
     let det_mean = Scalar::from((123.68, 116.78, 103.94));
     let swap_rb = true;
     detector.set_input_params(det_scale, det_input_size, det_mean, swap_rb, false)?;
+    Ok((detector, recognizer))
+}
 
-    let window = "bodycount";
-    highgui::named_window(window, highgui::WINDOW_AUTOSIZE)?;
+fn watch_stream(video_url: &str, count_data: SharedCountData) -> Result<()> {
+    let (detector, recognizer) = get_dnn()?;
 
-    let mut cam = videoio::VideoCapture::from_file("udp://@127.0.0.1:9999", videoio::CAP_FFMPEG)?;
+    let mut cam = videoio::VideoCapture::from_file(video_url, videoio::CAP_FFMPEG)?;
     let opened = videoio::VideoCapture::is_opened(&cam)?;
     if !opened {
-        panic!("Unable to open default camera!");
+        panic!("Unable to open stream!");
     }
-    let mut i = 0;
+    let mut frame_num = 0;
     let mut frame = Mat::default()?;
 
-    loop {
-        i += 1;
-        cam.grab()?;
-        if i % 10 == 0 {
-            i = 0;
+    let count = count_data.lock().unwrap().len();
+    let mut last_seen: Vec<Option<SystemTime>> = Vec::with_capacity(count);
+    for _i in 0..count {
+        last_seen.push(None);
+    }
 
+    const DEBOUNCE: Duration = Duration::from_secs(2);
+    // How often to run text detection.
+    const FRAME_RATE: u8 = 5;
+
+    loop {
+        frame_num += 1;
+        cam.grab()?;
+        if frame_num % FRAME_RATE == 0 {
+            frame_num = 0;
             cam.retrieve(&mut frame, 0)?;
+
+            // FIXME: offload text matching to another thread
+            //  Buffer only the most current frame, and share whatever it is
+            //  with the text detection thread.
+
+            highgui::imshow("monitor", &frame)?;
+            highgui::wait_key(1)?;
+
             let size = frame.size()?;
             if size.width > 0 {
-                detect_text(&frame, &detector, &recognizer)?;
-                highgui::imshow(window, &mut frame)?;
+                let col = size.width / 8;
+                let row = size.height / 8;
+                let height = row * 4;
+                let width = col * 6;
+                let x = row;
+                let y = col * 2;
+                let frame = Mat::roi(&frame, core::Rect::new(x, y, width, height))?;
+
+                if let Some(matches) = detect_text(&frame, &detector, &recognizer)? {
+                    log::trace!("Matches: {:?}", &matches);
+                    {
+                        let records = count_data.lock().unwrap();
+
+                        for recognizer_match in &matches {
+                            for (idx, record) in records.iter().enumerate() {
+                                if levenshtein(&record.match_text, &recognizer_match)
+                                    <= record.threshold
+                                {
+                                    last_seen[idx] = Some(SystemTime::now());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        let key = highgui::wait_key(10)?;
-        if key > 0 && key != 255 {
-            break;
+        let now = SystemTime::now();
+        let ready_to_inc: Vec<_> = last_seen
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(idx, x)| {
+                x.and_then(|when| {
+                    if now.duration_since(when).unwrap() >= DEBOUNCE {
+                        *x = None; // reset timer
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        if !ready_to_inc.is_empty() {
+            let mut counts = count_data.lock().unwrap();
+            for idx in ready_to_inc {
+                log::debug!("Inc idx=`{}` ({})", idx, &counts[idx].label);
+                counts[idx].value += 1;
+            }
         }
+
+        // FIXME: need a way to terminate the loop during shutdown.
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CountRecord {
+    threshold: usize,
+    label: String,
+    match_text: String,
+    value: usize,
+}
+
+type SharedCountData = Arc<Mutex<Vec<CountRecord>>>;
+
+fn main() -> Result<()> {
+    env_logger::init();
+    let args: Opt = Opt::from_args();
+
+    let stream_url = args.stream_url;
+    let http_host = args.http_host;
+    let http_port = args.http_port.to_string();
+
+    let count_data: Vec<CountRecord> =
+        serde_json::from_reader(std::fs::File::open(&args.data_file)?)?;
+
+    let count_data = Arc::new(Mutex::new(count_data));
+    let http_counts = count_data.clone();
+    let cv_counts = count_data.clone();
+
+    let _http_thread = std::thread::spawn(move || {
+        let count_data = http_counts;
+        log::info!("Starting http server.");
+        let server = simple_server::Server::new(move |_req, mut resp| {
+            let data = count_data.lock().unwrap();
+            Ok(resp
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(data.as_slice()).unwrap())?)
+        });
+        server.listen(&http_host, &http_port);
+    });
+    let cv_thread = std::thread::spawn(move || {
+        log::info!("Starting stream watcher.");
+        watch_stream(&stream_url, cv_counts).map_err(|e| e.to_string())
+    });
+
+    cv_thread.join().unwrap()?;
     Ok(())
 }
