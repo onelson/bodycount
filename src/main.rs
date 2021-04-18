@@ -1,4 +1,4 @@
-use opencv::{core, highgui, imgcodecs, imgproc, prelude::*, Result};
+use opencv::{core, highgui, imgcodecs, imgproc, prelude::*, types, Result};
 
 fn main() -> Result<()> {
     let target = imgcodecs::imread(
@@ -36,19 +36,22 @@ fn main() -> Result<()> {
     debug_assert_ne!(hsv1.size()?.width, 0);
     debug_assert_ne!(hsv1.size()?.height, 0);
 
+    let input1 = types::VectorOfMat::from(vec![hsv1]);
+
     imgproc::calc_hist(
-        &hsv1,
+        &input1,
         &vec![0, 1].into(),
         &mask,
         &mut hist1,
         &vec![50, 60].into(),
         &vec![0., 180., 0., 256.].into(),
-        false,
+        true,
     )
     .expect("calc hist 1");
 
+    let input2 = types::VectorOfMat::from(vec![hsv2]);
     imgproc::calc_hist(
-        &hsv2,
+        &input2,
         &vec![0, 1].into(),
         &mask,
         &mut hist2,
